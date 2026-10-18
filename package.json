@@ -1,0 +1,51 @@
+{
+  "name": "opencode-gate",
+  "version": "0.1.0",
+  "description": "Caps concurrent local-model subagents and reroutes overflow to a cloud model",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "subagent",
+    "gate"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": "./dist/index.js",
+    "./tui": "./dist/tui.js"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.0.26"
+  },
+  "peerDependenciesMeta": {
+    "@opentui/solid": {
+      "optional": true
+    },
+    "@opentui/core": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@opencode/plugin": "file:/home/charles/.config/opencode/node_modules/@opencode/plugin",
+    "typescript": "5.8.2",
+    "@types/bun": "1.4.0",
+    "solid-js": "1.9.15",
+    "@opentui/solid": "0.5.17",
+    "@opentui/core": "0.5.17"
+  },
+  "repository": "git+https://github.com/OWNER/gate.git"
+}

@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/solid",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "baseUrl": ".",
+    "paths": {
+      "@opencode/plugin/tui": ["./node_modules/@opencode/plugin/dist/tui/index.d.ts"],
+      "@opencode/plugin/rpc": ["./node_modules/@opencode/plugin/dist/rpc/index.d.ts"],
+      "@opencode/plugin": ["./node_modules/@opencode/plugin/dist/index.d.ts"],
+      "@opencode/client": ["./node_modules/@opencode/client/dist/promise/generated/types.d.ts"]
+    }
+  },
+  "include": ["src", "test"]
+}
