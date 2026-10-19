@@ -50,9 +50,33 @@ Subagents 0/2 · ↪ 2
 
 **Reservation** — when a launch is approved, a reservation is held for up to 60 seconds, keyed by the launch call; when the child session appears it is paired with its parent's oldest reservation.
 
+## Verified
+
+- **Installed from npm (opencode-gate@0.1.0):** server and TUI plugins load; footer shows the counter.
+- **Tested on a local build of the same files** (the npm tarball is byte-identical): cap 2 with 4 overlapping subagents (background + foreground), reroute to a free cloud model, sidebar panel with live updates and routed marks, `/gate`, `/gate-settings` with persistence.
+- **Not yet verified:** behaviour with the real (non-isolated) config; the full subagent run on the npm-installed copy.
+
 ## Install
 
-### From source (verified)
+### From npm (verified: loads server and TUI parts)
+
+In `opencode.json`:
+
+```json
+{ "plugins": ["opencode-gate"] }
+```
+
+or with options:
+
+```json
+{ "plugins": [{ "package": "opencode-gate", "options": { "cap": 2 } }] }
+```
+
+For the TUI, add `"opencode-gate"` to the `plugins` list of `cli.json` (OpenCode 2.0.32 migrates `tui.json` to `cli.json` on first launch; older versions: `tui.json` with the key `plugin`).
+
+Restart OpenCode after changing config; the first start downloads the package.
+
+### From source (for development)
 
 ```sh
 git clone https://github.com/G4LL4H4D/gate.git && cd gate
@@ -81,20 +105,6 @@ In the TUI config (`cli.json` on OpenCode 2.0.32 migrates `tui.json` to `cli.jso
 ```
 
 The folder needs no `node_modules`: the built files only import modules the host provides. A plain directory spec loads `<dir>/index.js` (server) and `<dir>/tui.js` (TUI); it does not read `package.json` `exports`. Restart OpenCode after changing config.
-
-### From npm (not yet verified — the package is not published)
-
-```json
-{ "plugins": ["opencode-gate"] }
-```
-
-or with options:
-
-```json
-{ "plugins": [{ "package": "opencode-gate", "options": { "cap": 2 } }] }
-```
-
-For the TUI, add `"opencode-gate"` to the plugins list of `cli.json` (on older OpenCode versions the key is `plugin` in `tui.json`).
 
 ## Configuration
 
@@ -140,7 +150,7 @@ Clearing the reroute model in the `/gate-settings` dialog removes the saved over
 - The `[routed to X]` title tag can be lost if the session title is generated before the reroute link fires (not observed in testing).
 - The `↳ X finished` line is drawn by OpenCode core and does not carry the `[routed to X]` tag. (unverified)
 - When a child session is created, GATE links it to the oldest outstanding reservation of its parent session (the host does not expose the originating call id). With several concurrent launches from one parent the pairing is by age, not by call.
-- npm-installed TUI plugins may hit upstream issue [anomalyco/opencode#33884](https://github.com/anomalyco/opencode/issues/33884) (unverified).
+- Upstream issue [anomalyco/opencode#33884](https://github.com/anomalyco/opencode/issues/33884) reports npm-installed TUI plugins failing to load in some setups; it did not occur in the test above.
 
 ## Development
 
