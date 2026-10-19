@@ -1,6 +1,16 @@
 // Pure cap / reservation framework for the GATE plugin.
 // All state is internal; no Effect / plugin coupling. Inject a clock for tests.
 
+/** Strip keys whose value is undefined from an object. */
+export function stripUndefined<T extends object>(o: T): T {
+	const out: Record<string, unknown> = {}
+	for (const k of Object.keys(o)) {
+		const v = (o as any)[k]
+		if (v !== undefined) out[k] = v
+	}
+	return out as T
+}
+
 export interface GateCounts {
 	active: number
 	reservations: number

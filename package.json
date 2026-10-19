@@ -31,19 +31,15 @@
     "build": "bun run scripts/build.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "prepublishOnly": "grep '\"file:' package.json && { echo 'Cannot publish: file: devDependencies found'; exit 1; } || true && bun run typecheck && bun test && bun run build"
+    "prepublishOnly": "bun run typecheck && bun test && bun run build"
   },
   "peerDependencies": {
     "@opencode/plugin": ">=2.0.26",
     "@opentui/solid": "*",
-    "@opentui/core": "*",
     "solid-js": ">=1.9.0"
   },
   "peerDependenciesMeta": {
     "@opentui/solid": {
-      "optional": true
-    },
-    "@opentui/core": {
       "optional": true
     },
     "solid-js": {

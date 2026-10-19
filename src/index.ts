@@ -1,6 +1,6 @@
 import { Plugin } from "@opencode/plugin"
 import { Gate, type ChildEntry, type DebugInfo, type RecentEntry, type Stats } from "./rpc"
-import { createGate, claimRerouteForChild, shouldDropActive, withTimeout } from "./gate"
+import { createGate, claimRerouteForChild, shouldDropActive, withTimeout, stripUndefined } from "./gate"
 import { DEFAULT_SETTINGS, parseSettings, resolveSettings, wireSettings } from "./settings"
 import type { Settings } from "./settings"
 
@@ -106,7 +106,7 @@ export default Plugin.define({
 				active: c.active + c.reservations,
 				cap: c.cap,
 				...counters,
-				recent: recent.slice(-RECENT_LIMIT).map(({ callID: _callID, ...entry }) => ({ ...entry })),
+				recent: recent.slice(-RECENT_LIMIT).map(({ callID: _callID, ...entry }) => stripUndefined({ ...entry })),
 				children: [...childInfo.values()],
 				debug: { ...debug },
 			}
@@ -321,7 +321,7 @@ export default Plugin.define({
 				reroutedCalls.set(event.id, { model: suggestion, at: Date.now() })
 				pendingReroutes.push({ callID: event.id, parentID: event.sessionID, model: suggestion, agent, description: typeof input.description === "string" ? input.description : undefined, at: Date.now() })
 				counters.rerouted++
-				record({ time: Date.now(), kind: "reroute", agent, parentID: event.sessionID, model: suggestion, callID: event.id })
+				record({ time: Date.now(), kind: "reroute", ...(agent !== undefined && { agent }), parentID: event.sessionID, ...(suggestion !== undefined && { model: suggestion }), callID: event.id })
 				debug = { lastDecision: "reroute", active: c.active, reservations: c.reservations, at: Date.now() }
 				logDebug("[gate] decision", "reroute", "active", c.active, "reservations", c.reservations, "cap", c.cap)
 				logDebug("[gate] reroute:", agent ?? "(unnamed)", "→", suggestion, "-", status)
@@ -330,7 +330,7 @@ export default Plugin.define({
 			}
 
 			counters.denied++
-			record({ time: Date.now(), kind: "deny", agent, parentID: event.sessionID, model: providerID, callID: event.id })
+			record({ time: Date.now(), kind: "deny", ...(agent !== undefined && { agent }), parentID: event.sessionID, ...(providerID !== undefined && { model: providerID }), callID: event.id })
 			debug = { lastDecision: "deny", active: c.active, reservations: c.reservations, at: Date.now() }
 			console.warn("[gate] decision", "deny", "active", c.active, "reservations", c.reservations, "cap", c.cap)
 			console.warn("[gate] deny:", agent ?? "(unnamed)", "-", status)

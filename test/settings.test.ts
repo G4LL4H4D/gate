@@ -256,10 +256,28 @@ describe("withRerouteModel", () => {
 		expect("rerouteModel" in result).toBe(false)
 	})
 
+	it("drops existing rerouteModel key when model is undefined", () => {
+		const s = { cap: 2, rerouteModel: "a/b", extraCloudProviders: [], debug: false }
+		const result = withRerouteModel(s, undefined)
+		expect("rerouteModel" in result).toBe(false)
+		expect(result.cap).toBe(2)
+		expect(result.debug).toBe(false)
+		expect(result.extraCloudProviders).toEqual([])
+	})
+
 	it("includes rerouteModel when defined", () => {
 		const s = { cap: 2, extraCloudProviders: [], debug: false }
 		const result = withRerouteModel(s, "openai/gpt-4")
 		expect(result.rerouteModel).toBe("openai/gpt-4")
 		expect("rerouteModel" in result).toBe(true)
+	})
+
+	it("replaces existing rerouteModel when model is defined", () => {
+		const s = { cap: 2, rerouteModel: "a/b", extraCloudProviders: ["x"], debug: true }
+		const result = withRerouteModel(s, "openai/gpt-4")
+		expect(result.rerouteModel).toBe("openai/gpt-4")
+		expect(result.cap).toBe(2)
+		expect(result.extraCloudProviders).toEqual(["x"])
+		expect(result.debug).toBe(true)
 	})
 })

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test"
-import { createGate, shouldDropActive } from "../src/gate"
+import { createGate, shouldDropActive, stripUndefined } from "../src/gate"
 import type { Gate } from "../src/gate"
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -235,5 +235,31 @@ describe("shouldDropActive", () => {
 
 	it("true when idle is after startedAt", () => {
 		expect(shouldDropActive(600, 500)).toBe(true)
+	})
+})
+
+// ── stripUndefined ──────────────────────────────────────────────────────
+
+describe("stripUndefined", () => {
+	it("removes keys with undefined values", () => {
+		const obj = { a: 1, b: undefined, c: "hello", d: undefined } as Record<string, unknown>
+		const result = stripUndefined(obj)
+		expect(Object.keys(result)).toEqual(["a", "c"])
+		expect(result.a).toBe(1)
+		expect(result.c).toBe("hello")
+		expect("b" in result).toBe(false)
+		expect("d" in result).toBe(false)
+	})
+
+	it("returns unchanged for object with no undefined values", () => {
+		const obj = { a: 1, b: "x", c: true } as Record<string, unknown>
+		const result = stripUndefined(obj)
+		expect(Object.keys(result).sort()).toEqual(["a", "b", "c"])
+	})
+
+	it("handles empty object", () => {
+		const obj = {} as Record<string, unknown>
+		const result = stripUndefined(obj)
+		expect(Object.keys(result)).toEqual([])
 	})
 })

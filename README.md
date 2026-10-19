@@ -33,7 +33,7 @@ or with options:
 { "plugins": [{ "package": "opencode-gate", "options": { "cap": 2 } }] }
 ```
 
-**TUI:** add `"opencode-gate"` to the plugins list of `cli.json` (on older OpenCode versions the key is `plugin` in `tui.json`).
+**TUI:** add `"opencode-gate"` to the plugins list of `cli.json` (on older OpenCode versions the key is `plugin` in `tui.json`). If the TUI part does not load, try `opencode-gate/tui` (unverified).
 
 **Local dev:** build this repo, then copy `dist/index.js`, `dist/tui.js` and `package.json` to a folder and point the plugin spec at that folder (verified to work).
 
@@ -45,13 +45,15 @@ In `opencode.json`, pass options to the package:
 
 ```json
 {
-  "package": "opencode-gate",
-  "options": {
-    "cap": 2,
-    "rerouteModel": "provider/model",
-    "extraCloudProviders": [],
-    "debug": false
-  }
+  "plugins": [{
+    "package": "opencode-gate",
+    "options": {
+      "cap": 2,
+      "rerouteModel": "provider/model",
+      "extraCloudProviders": [],
+      "debug": false
+    }
+  }]
 }
 ```
 
@@ -59,6 +61,8 @@ In `opencode.json`, pass options to the package:
 - `rerouteModel` — cloud model to reroute overflow to (default: auto-picked cheapest tool-capable cloud model by output cost).
 - `extraCloudProviders` — additional providers treated as cloud (default `[]`).
 - `debug` — verbose logging (default `false`).
+
+Clearing the reroute model in the settings dialog removes the saved override, so a `rerouteModel` set in config applies again after a restart.
 
 In-TUI settings dialog is persisted on the server. Precedence: stored settings > config options > defaults.
 

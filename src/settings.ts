@@ -121,18 +121,12 @@ export function wireSettings(s: Settings): Settings {
 }
 
 /**
- * Return a Settings copy without rerouteModel when model is undefined.
+ * Return a Settings copy with the given model as rerouteModel, or drop
+ * the key entirely when model is undefined.
  */
 export function withRerouteModel(s: Settings, model: string | undefined): Settings {
-	if (model === undefined) {
-		const out: Record<string, unknown> = {}
-		for (const k of Object.keys(s)) {
-			const v = (s as any)[k]
-			if (v !== undefined) out[k] = v
-		}
-		return out as Settings
-	}
-	return { ...s, rerouteModel: model }
+	const { rerouteModel: _old, ...rest } = s
+	return model === undefined ? rest : { ...rest, rerouteModel: model }
 }
 
 /**
