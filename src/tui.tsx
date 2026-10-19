@@ -262,9 +262,8 @@ export default Plugin.define({
       }
 
       const limitedRows = createMemo(() => {
-        const fam = family()
-        // family() order is whatever ctx.data.session.family returns; ordering is unverified from host d.ts
-        return limitRows(fam, (id) => ctx.data.session.status(id) === "running")
+        // family() returns oldest-first (observed live in OpenCode 2.0.32), so reverse for newest-first
+        return limitRows([...family()].reverse(), (id) => ctx.data.session.status(id) === "running")
       })
 
       return (
