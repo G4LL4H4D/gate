@@ -71,10 +71,10 @@ In `opencode.json`:
 or with options:
 
 ```json
-{ "plugins": [{ "path": "/home/you/gate-plugin", "options": { "cap": 2 } }] }
+{ "plugins": [{ "package": "/home/you/gate-plugin", "options": { "cap": 2 } }] }
 ```
 
-In the TUI config (`cli.json` on OpenCode 2.0.x, which is where `tui.json` is migrated to; older versions: `tui.json` with the key `plugin`):
+In the TUI config (`cli.json` on OpenCode 2.0.32 migrates `tui.json` to `cli.json` on first launch (seen in its log); older versions: `tui.json` with the key `plugin`):
 
 ```json
 { "plugins": ["/home/you/gate-plugin"] }
