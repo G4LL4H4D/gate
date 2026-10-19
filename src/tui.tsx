@@ -6,6 +6,7 @@ import type { Settings } from "./settings"
 import { withRerouteModel } from "./settings"
 import { Show, For, createMemo } from "solid-js"
 import { splitRoutedTitle, shortModel } from "./title"
+import { limitRows } from "./panel"
 
 export default Plugin.define({
   id: "gate-tui",
@@ -32,6 +33,7 @@ export default Plugin.define({
     )
     const seen = new Set<string>()
     let seeded = false
+    const [gateUi, setGateUi] = ctx.storage.store("gate-ui", { initial: { expanded: false } })
     let disposed = false
 
     function color(pick: any): string | undefined {
@@ -259,15 +261,34 @@ export default Plugin.define({
         return color((t: any) => atCap ? t.text.feedback.warning.base : t.text.muted)
       }
 
+      const limitedRows = createMemo(() => {
+        const fam = family()
+        return limitRows(fam, (id) => ctx.data.session.status(id) === "running")
+      })
+
       return (
         <Show when={family().length > 0}>
-          <box flexDirection="column" border={true} borderColor={color((t: any) => t.border.base)} backgroundColor={color((t: any) => t.background.raised.base)}>
-            <text fg={headerFg()}>
-              Subagents {active()}/{cap()} · ↪ {rerouted()}
-            </text>
-            <For each={family()}>
-              {(id) => <Row id={id} stacked />}
-            </For>
+          <box flexDirection="column">
+            <box flexDirection="row" onMouseUp={() => setGateUi(d => { d.expanded = !d.expanded }).catch(() => {})}>
+              <strong>
+                {gateUi.expanded ? "▼" : "▶"} Subagents
+              </strong>
+              <text fg={headerFg()}>
+                {" "}({active()}/{cap()} active{rerouted() > 0 ? `, {rerouted()} rerouted` : ""})
+              </text>
+            </box>
+            <Show when={gateUi.expanded}>
+              <box flexDirection="column" border={true} borderColor={color((t: any) => t.border.base)} backgroundColor={color((t: any) => t.background.raised.base)}>
+                <For each={limitedRows().rows}>
+                  {(id) => <Row id={id} stacked />}
+                </For>
+                <Show when={limitedRows().hidden > 0}>
+                  <text fg={color((t: any) => t.text.muted)}>
+                    {" "}+{limitedRows().hidden} more finished
+                  </text>
+                </Show>
+              </box>
+            </Show>
           </box>
         </Show>
       )
