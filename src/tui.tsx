@@ -263,6 +263,7 @@ export default Plugin.define({
 
       const limitedRows = createMemo(() => {
         const fam = family()
+        // family() order is whatever ctx.data.session.family returns; ordering is unverified from host d.ts
         return limitRows(fam, (id) => ctx.data.session.status(id) === "running")
       })
 
@@ -270,11 +271,9 @@ export default Plugin.define({
         <Show when={family().length > 0}>
           <box flexDirection="column">
             <box flexDirection="row" onMouseUp={() => setGateUi(d => { d.expanded = !d.expanded }).catch(() => {})}>
-              <strong>
-                {gateUi.expanded ? "▼" : "▶"} Subagents
-              </strong>
+              <text fg={color((t: any) => t.text.base)}>{gateUi.expanded ? "▼" : "▶"} Subagents</text>
               <text fg={headerFg()}>
-                {" "}({active()}/{cap()} active{rerouted() > 0 ? `, {rerouted()} rerouted` : ""})
+                {` (${active()}/${cap()} active${rerouted() > 0 ? `, ${rerouted()} rerouted` : ""})`}
               </text>
             </box>
             <Show when={gateUi.expanded}>
