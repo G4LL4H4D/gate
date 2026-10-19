@@ -1,10 +1,12 @@
-# opencode-gate
+# GATE
 
 Concurrency gate for OpenCode: caps concurrent local-model subagents and reroutes overflow to a cloud model.
 
+npm package: `opencode-gate` · Requires OpenCode V2 (tested on 2.0.32) · License MIT
+
 ## Why
 
-A single local model server handles only a few concurrent requests. When many parallel subagents launch, they queue or time out. GATE caps concurrent local-model subagents globally and reroutes overflow to a cloud model so work keeps moving.
+Local model servers handle a limited number of concurrent requests. GATE keeps the number of parallel local-model subagents under a cap (default 2) and sends the overflow to a cloud model instead, so a burst of subagents does not pile onto one local server.
 
 ## What you get
 
@@ -50,7 +52,37 @@ Subagents 0/2 · ↪ 2
 
 ## Install
 
-**npm** (not yet verified — package not published):
+### From source (verified)
+
+```sh
+git clone https://github.com/G4LL4H4D/gate.git && cd gate
+bun install && bun run build
+mkdir -p ~/gate-plugin && cp dist/index.js dist/tui.js package.json ~/gate-plugin/
+```
+
+Use an absolute path to the folder; relative paths are untested.
+
+In `opencode.json`:
+
+```json
+{ "plugins": ["/home/you/gate-plugin"] }
+```
+
+or with options:
+
+```json
+{ "plugins": [{ "path": "/home/you/gate-plugin", "options": { "cap": 2 } }] }
+```
+
+In the TUI config (`cli.json` on OpenCode 2.0.x, which is where `tui.json` is migrated to; older versions: `tui.json` with the key `plugin`):
+
+```json
+{ "plugins": ["/home/you/gate-plugin"] }
+```
+
+The folder needs no `node_modules`: the built files only import modules the host provides. A plain directory spec loads `<dir>/index.js` (server) and `<dir>/tui.js` (TUI); it does not read `package.json` `exports`. Restart OpenCode after changing config.
+
+### From npm (not yet verified — the package is not published)
 
 ```json
 { "plugins": ["opencode-gate"] }
@@ -64,10 +96,6 @@ or with options:
 
 For the TUI, add `"opencode-gate"` to the plugins list of `cli.json` (on older OpenCode versions the key is `plugin` in `tui.json`).
 
-**Local dev** (verified): build this repo, then copy `dist/index.js`, `dist/tui.js` and `package.json` into a folder and point the plugin spec at that folder. A plain directory plugin spec does NOT resolve `package.json` `exports` — the host loads `<dir>/index.js` (server) and `<dir>/tui.js` (TUI).
-
-See https://opencode.ai/v2/docs/plugins for the plugin reference.
-
 ## Configuration
 
 Pass options to the package in `opencode.json`. Precedence: stored settings > config options > defaults.
@@ -77,7 +105,7 @@ Pass options to the package in `opencode.json`. Precedence: stored settings > co
 | `cap` | integer (1–32) | `2` | Max concurrent local-model subagents across all sessions |
 | `rerouteModel` | `"provider/model"` or absent | auto | Cloud model to reroute overflow to; omit (or clear in the dialog) to use auto-pick |
 | `extraCloudProviders` | `string[]` | `[]` | Additional providers treated as cloud (lowercased, deduped) |
-| `debug` | `boolean` | `false` | Verbose `[gate]` logging via console.info (where this ends up depends on the host; the /gate debug summary always works) |
+| `debug` | `boolean` | `false` | Verbose `[gate]` logging (console.info). The `/gate` debug summary works either way. |
 
 Example:
 
@@ -101,7 +129,7 @@ Clearing the reroute model in the `/gate-settings` dialog removes the saved over
 
 **Plugin not listed in the Plugins dialog** — check the OpenCode logs for `[gate]` or `[gate-tui]` errors during startup.
 
-**Sidebar panel empty** — the panel only appears when the current session has spawned subagents (children). It is scoped to the active session's family.
+**Sidebar panel empty** — the panel only appears when the current session has spawned subagents (children).
 
 **Nothing reroutes** — verify the provider is actually cloud. A provider is local if it is not on the allowlist above and not in `extraCloudProviders`. If all providers are local, the cap is the only gate and overflow is denied.
 
