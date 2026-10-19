@@ -33,7 +33,21 @@ export default Plugin.define({
     )
     const seen = new Set<string>()
     let seeded = false
-    const [gateUi, setGateUi] = ctx.storage.store("gate-ui", { initial: { expanded: false } })
+    let gateUi: { expanded: boolean }
+    let setGateUi: any
+    try {
+      const [g, s] = ctx.storage.store("gate-ui", { initial: { expanded: false } })
+      gateUi = g; setGateUi = s
+    } catch {
+      // Older host may not support ctx.storage.store; fall back to in-memory state (non-persistent)
+      const state = { expanded: false }
+      gateUi = state
+      setGateUi = (fn: any) => {
+        if (typeof fn === "function") fn(state)
+        else Object.assign(state, fn)
+        return Promise.resolve()
+      }
+    }
     let disposed = false
 
     function color(pick: any): string | undefined {
@@ -149,10 +163,6 @@ export default Plugin.define({
       }
     }
 
-    function truncate(s: string, n: number): string {
-      return s.length > n ? s.slice(0, n) : s
-    }
-
     function SubagentPanel(props: { sessionID: string; compact?: boolean }) {
       const family = createMemo(() => ctx.data.session.family(props.sessionID).filter(id => id !== props.sessionID))
 
@@ -243,8 +253,8 @@ export default Plugin.define({
 
       if (props.compact) {
         const runningRows = createMemo(() => {
-          const fam = family()
-          return fam.filter(id => ctx.data.session.status(id) === "running")
+          // newest-first like the sidebar
+          return [...family()].reverse().filter(id => ctx.data.session.status(id) === "running")
         })
         return (
           <For each={runningRows()}>
@@ -257,7 +267,7 @@ export default Plugin.define({
       const cap = () => statsAccessor()?.cap ?? 0
       const rerouted = () => statsAccessor()?.rerouted ?? 0
       const headerFg = () => {
-        const atCap = active() >= cap()
+        const atCap = !!statsAccessor() && active() >= cap()
         return color((t: any) => atCap ? t.text.feedback.warning.base : t.text.muted)
       }
 
@@ -269,7 +279,8 @@ export default Plugin.define({
       return (
         <Show when={family().length > 0}>
           <box flexDirection="column">
-            <box flexDirection="row" onMouseUp={() => setGateUi(d => { d.expanded = !d.expanded }).catch(() => {})}>
+            <box flexDirection="row" onMouseUp={() => setGateUi((d: { expanded: boolean }) => { d.expanded = !d.expanded }).catch(() => {})}>
+              {/* swallow intentional — persist failure must not break the UI */}
               <text fg={color((t: any) => t.text.base)}>{gateUi.expanded ? "▼" : "▶"} Subagents</text>
               <text fg={headerFg()}>
                 {` (${active()}/${cap()} active${rerouted() > 0 ? `, ${rerouted()} rerouted` : ""})`}

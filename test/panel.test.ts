@@ -53,4 +53,17 @@ describe("limitRows", () => {
     expect(result.rows).toEqual(["finished-1", "finished-2"])
     expect(result.hidden).toBe(3)
   })
+
+  it("empty ids -> {rows: [], hidden: 0}", () => {
+    const result = limitRows([], isRunning)
+    expect(result.rows).toEqual([])
+    expect(result.hidden).toBe(0)
+  })
+
+  it("maxFinished = 0 -> only running rows, hidden = finished count", () => {
+    const ids = ["running-1", "finished-1", "finished-2", "finished-3"]
+    const result = limitRows(ids, isRunning, 0)
+    expect(result.rows).toEqual(["running-1"])
+    expect(result.hidden).toBe(3)
+  })
 })
