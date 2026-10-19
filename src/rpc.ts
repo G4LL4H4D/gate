@@ -1,4 +1,5 @@
 import { Rpc } from "@opencode/plugin/rpc"
+import type { Settings } from "./settings.js"
 
 export type RecentEntry = {
 	time: number
@@ -76,12 +77,45 @@ const statsSchema = {
 	},
 } as const
 
+export const settingsSchema = {
+	type: "object",
+	properties: {
+		cap: { type: "integer" },
+		rerouteModel: { type: "string" },
+		extraCloudProviders: { type: "array", items: { type: "string" } },
+		debug: { type: "boolean" },
+	},
+	required: ["cap", "extraCloudProviders", "debug"],
+	additionalProperties: false,
+} as const
+
+// Error schema for settingsSet validation failures.
+// The handler must use `context.error("validation_error", message, { message })` to return this.
+// If the handler throws instead, the RPC framework converts it to rpc.internal.
+const settingsValidationError = {
+	type: "object",
+	required: ["message"],
+	properties: {
+		message: { type: "string" },
+	},
+	additionalProperties: false,
+} as const
+
 export const Gate = Rpc.define({
-	id: "subagent-gate",
+	id: "gate",
 	methods: {
 		stats: { input: { type: "object" }, output: statsSchema },
+		settingsGet: { input: { type: "object" }, output: settingsSchema },
+		settingsSet: {
+			input: settingsSchema,
+			output: settingsSchema,
+			errors: {
+				validation_error: settingsValidationError,
+			},
+		},
 	},
 	events: {
 		changed: { schema: statsSchema },
+		settingsChanged: { schema: settingsSchema },
 	},
 })

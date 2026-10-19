@@ -1,5 +1,8 @@
 import { Plugin } from "@opencode/plugin"
 import { Gate, type ChildEntry, type DebugInfo, type RecentEntry, type Stats } from "./rpc"
+import { createGate, claimRerouteForChild, shouldDropActive, withTimeout } from "./gate"
+import { DEFAULT_SETTINGS, parseSettings, resolveSettings, wireSettings } from "./settings"
+import type { Settings } from "./settings"
 
 // Cloud provider IDs — runtime Provider.ID values (kebab-case). Anything not in this set is local.
 const CLOUD_PROVIDERS = new Set([
@@ -22,7 +25,6 @@ const CLOUD_PROVIDERS = new Set([
 	"cerebras",
 ])
 
-const LOCAL_CHILD_CAP = 2
 const GRACE_MS = 5_000
 const TTL_MS = 60_000
 const RECONNECT_DELAY_MS = 1_000
@@ -44,8 +46,11 @@ interface RerouteEntry {
 
 type RecentRecord = RecentEntry & { callID: string }
 
-function isLocalProvider(providerID: string | undefined): boolean {
-	return !!providerID && !CLOUD_PROVIDERS.has(providerID)
+function isLocalProvider(providerID: string | undefined, extraCloudProviders?: string[]): boolean {
+	if (!providerID) return false
+	if (CLOUD_PROVIDERS.has(providerID)) return false
+	if (extraCloudProviders?.includes(providerID.toLowerCase())) return false
+	return true
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
@@ -53,37 +58,103 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 const describeError = (err: unknown) => (err instanceof Error ? err.message : String(err))
 
 export default Plugin.define({
-	id: "subagent-gate",
+	id: "gate",
 	async setup(ctx) {
 		const localChildren = new Set<string>()
-		const activeLocalChildren = new Set<string>()
 		const createdAt = new Map<string, number>()
 		const startedAt = new Map<string, number>()
-		const reservations = new Map<string, Reservation>()
+		// ── Settings ──────────────────────────────────────────────────────
+
+		let settings: Settings
+		let stored: unknown
+		try {
+			stored = await ctx.storage.get("settings")
+		} catch (err) {
+			console.warn("[gate] storage read failed, using options + defaults:", describeError(err))
+			stored = undefined
+		}
+		try {
+			settings = resolveSettings(stored, ctx.options)
+		} catch (err) {
+			console.warn("[gate] invalid stored settings, ignoring:", describeError(err))
+			settings = resolveSettings(undefined, ctx.options)
+		}
+		// If only options are invalid, resolveSettings → parseSettings throws (fail loud).
+
+		const logDebug = (...args: Parameters<typeof console.info>): void => {
+			if (settings.debug) console.info("[gate]", ...args)
+		}
+
+		const gate = createGate({ getCap: () => settings.cap, ttlMs: TTL_MS, now: () => Date.now() })
 		// Tool-call IDs rerouted to a cloud model, so execute.after can note it on the result.
 		const reroutedCalls = new Map<string, { model: string; at: number }>()
 		const pendingReroutes: RerouteEntry[] = []
+		const claimedReroutes = new Map<string, RerouteEntry>()
 		const recent: RecentRecord[] = []
 		const counters = { launchedLocal: 0, rerouted: 0, denied: 0 }
 		let chain: Promise<void> = Promise.resolve()
+		let settingsChain: Promise<void> = Promise.resolve()
 
 		const childInfo = new Map<string, ChildEntry>()
 		const reroutedTitles = new Map<string, string>()
+		const localChildEntries = new Map<string, ChildEntry>()
 		let debug: DebugInfo = { lastDecision: "none", active: 0, reservations: 0, at: 0 }
 
-		const snapshot = (): Stats => ({
-			active: activeLocalChildren.size + reservations.size,
-			cap: LOCAL_CHILD_CAP,
-			...counters,
-			recent: recent.slice(-RECENT_LIMIT).map(({ callID: _callID, ...entry }) => ({ ...entry })),
-			children: [...childInfo.values()],
-			debug: { ...debug },
+		const snapshot = (): Stats => {
+			const c = gate.counts()
+			return {
+				active: c.active + c.reservations,
+				cap: c.cap,
+				...counters,
+				recent: recent.slice(-RECENT_LIMIT).map(({ callID: _callID, ...entry }) => ({ ...entry })),
+				children: [...childInfo.values()],
+				debug: { ...debug },
+			}
+		}
+
+		const reg = await ctx.rpc.register(Gate, {
+			stats: async () => snapshot(),
+			settingsGet: async () => wireSettings(settings),
+			settingsSet: async (input, context) => {
+				let parsed: Settings
+				try {
+					parsed = parseSettings(input)
+				} catch (err) {
+					return context.error("validation_error", describeError(err), { message: describeError(err) })
+				}
+				// Validate rerouteModel provider is cloud (only if model list is readable).
+				if (parsed.rerouteModel) {
+					try {
+						const models = await withTimeout(ctx.model.list(), 5_000, "settingsSet-model.list")
+						const found = models.data?.find((m) => m.providerID + "/" + m.id === parsed.rerouteModel)
+						if (found && isLocalProvider(found.providerID, parsed.extraCloudProviders)) {
+							return context.error("validation_error", "rerouteModel provider is local, must be cloud: " + parsed.rerouteModel, { message: "rerouteModel provider is local" })
+						}
+					} catch (err) {
+						// Model list unreadable within timeout — accept the value.
+						console.warn("[gate] model.list unavailable during settingsSet, accepting rerouteModel:", parsed.rerouteModel)
+					}
+				}
+				// Persist → assign → emit through settingsChain; await the link and return its result.
+				const run = settingsChain.then(async () => {
+					try {
+						const wired = wireSettings(parsed)
+						await ctx.storage.set("settings", wired)
+					} catch (e) {
+						return context.error("validation_error", "could not persist settings: " + describeError(e), { message: describeError(e) })
+					}
+					settings = parsed
+					reg.events.emit("settingsChanged", wireSettings(settings)).catch((e) => console.warn("[gate] settingsChanged emit failed:", e))
+					emit()
+					return wireSettings(parsed)
+				})
+				settingsChain = run.then(() => {}, () => {})
+				return run
+			},
 		})
 
-		const reg = await ctx.rpc.register(Gate, { stats: async () => snapshot() })
-
 		const emit = () => {
-			reg.events.emit("changed", snapshot()).catch((err) => console.warn("[subagent-gate] emit failed:", err))
+			reg.events.emit("changed", snapshot()).catch((err) => console.warn("[gate] emit failed:", err))
 		}
 
 		const record = (entry: RecentRecord) => {
@@ -92,22 +163,22 @@ export default Plugin.define({
 		}
 
 		const pruneExpired = () => {
-			const cutoff = Date.now() - TTL_MS
-			for (const [id, reservation] of reservations) {
-				if (reservation.at < cutoff) reservations.delete(id)
-			}
-			while (pendingReroutes.length > 0 && pendingReroutes[0].at < cutoff) pendingReroutes.shift()
+			gate.expire()
+			while (pendingReroutes.length > 0 && pendingReroutes[0].at < Date.now() - TTL_MS) pendingReroutes.shift()
 			// Prune stale createdAt entries.
 			for (const [id, ts] of createdAt) {
-				if (ts < cutoff) createdAt.delete(id)
+				if (ts < Date.now() - TTL_MS) createdAt.delete(id)
 			}
 			// Prune stale reroutedCalls entries.
 			for (const [id, entry] of reroutedCalls) {
-				if (entry.at < cutoff) reroutedCalls.delete(id)
+				if (entry.at < Date.now() - TTL_MS) reroutedCalls.delete(id)
 			}
 		}
 
-		const isFull = () => activeLocalChildren.size + reservations.size >= LOCAL_CHILD_CAP
+		const isFull = () => {
+			const c = gate.counts()
+			return c.active + c.reservations >= c.cap
+		}
 
 		// Order: explicit model override → agent model → parent session model → default model.
 		const resolveProvider = async (
@@ -144,7 +215,7 @@ export default Plugin.define({
 		const suggestCloudModel = async (parentProviderID: string | undefined): Promise<string | undefined> => {
 			const { data: models } = await ctx.model.list()
 			const candidates = models
-				.filter((m) => m.enabled === true && m.status === "active" && m.capabilities?.tools === true && !isLocalProvider(m.providerID))
+				.filter((m) => m.enabled === true && m.status === "active" && m.capabilities?.tools === true && !isLocalProvider(m.providerID, settings.extraCloudProviders))
 				.map((m) => ({ providerID: m.providerID, id: m.id, costOutput: m.cost?.[0]?.output ?? Infinity }))
 			if (candidates.length === 0) return undefined
 			const parentMatches = candidates.filter((m) => m.providerID === parentProviderID)
@@ -157,13 +228,14 @@ export default Plugin.define({
 			const now = Date.now()
 			const dropped: string[] = []
 			await Promise.all(
-				[...activeLocalChildren].map(async (id) => {
+				[...gate.activeIDs()].map(async (id) => {
 					if (now - (createdAt.get(id) ?? 0) < GRACE_MS) return
 					try {
-						const session = await ctx.session.get({ sessionID: id })
+						const session = await withTimeout(ctx.session.get({ sessionID: id }), 5_000, "reconcile-session.get")
 						const sa = startedAt.get(id)
-						if (!sa) return
-						if (!session.time.idle || session.time.idle < sa) return
+						if (!shouldDropActive(session.time.idle, sa)) return
+						// idle >= started → session finished but we missed the event
+						dropped.push(id)
 					} catch (err) {
 						const msg = describeError(err)
 						const isNotFound =
@@ -174,19 +246,24 @@ export default Plugin.define({
 							dropped.push(id)
 							return
 						}
-						console.warn("[subagent-gate] reconcile ctx.session.get error for", id, ":", msg)
+						console.warn("[gate] reconcile ctx.session.get error for", id, ":", msg)
 						return
 					}
-					dropped.push(id)
 				}),
 			)
 			if (dropped.length === 0) return
 			for (const id of dropped) {
-				activeLocalChildren.delete(id)
+				gate.deactivate(id)
 				startedAt.delete(id)
 				childInfo.delete(id)
 			}
-			console.info("[subagent-gate] reconcile dropped", dropped.length, "→ active", activeLocalChildren.size)
+			logDebug("[gate] reconcile dropped", dropped.length, "→ active", gate.counts().active)
+
+			// Prune stale localChildEntries.
+			for (const id of [...localChildEntries.keys()]) {
+				if (!childInfo.has(id) && !localChildren.has(id)) localChildEntries.delete(id)
+			}
+
 			emit()
 		}
 
@@ -194,26 +271,49 @@ export default Plugin.define({
 		const decide = async (event: { id: string; sessionID: string; input: unknown }, providerID: string | undefined) => {
 			const input = (event.input ?? {}) as Record<string, unknown>
 			pruneExpired()
-			if (isFull() && activeLocalChildren.size > 0) await reconcile()
+			if (isFull() && gate.activeIDs().length > 0) await reconcile()
 
 			if (!isFull()) {
-				reservations.set(event.id, { parentID: event.sessionID, at: Date.now() })
-				counters.launchedLocal++
-				debug = { lastDecision: "local", active: activeLocalChildren.size, reservations: reservations.size, at: Date.now() }
-				console.info("[subagent-gate] decision", "local", "active", activeLocalChildren.size, "reservations", reservations.size, "cap", LOCAL_CHILD_CAP)
-				emit()
-				return
+				const res = gate.reserve(event.id, event.sessionID)
+				if (res.ok) {
+					counters.launchedLocal++
+					debug = { lastDecision: "local", active: gate.counts().active, reservations: gate.counts().reservations, at: Date.now() }
+					logDebug("[gate] decision", "local", "active", gate.counts().active, "reservations", gate.counts().reservations, "cap", gate.getCap())
+					emit()
+					return
+				}
+				// reserve returned {ok:false} — gate is full (shouldn't happen after isFull check, but be safe)
 			}
 
 			const agent = typeof input.agent === "string" ? input.agent : undefined
-			const status = "Local-model subagent cap reached (" + (activeLocalChildren.size + reservations.size) + "/" + LOCAL_CHILD_CAP + " active)."
+			const c = gate.counts()
+			const status = "Local-model subagent cap reached (" + (c.active + c.reservations) + "/" + c.cap + " active)."
 
 			let suggestion: string | undefined
 			let suggestionError: unknown
-			try {
-				suggestion = await suggestCloudModel(await getParentProvider(event.sessionID))
-			} catch (err) {
-				suggestionError = err
+
+			// Use settings.rerouteModel if set and available in the model list.
+			if (settings.rerouteModel) {
+				try {
+					const models = await withTimeout(ctx.model.list(), 5_000, "model.list")
+					const found = models.data?.find((m) => m.providerID + "/" + m.id === settings.rerouteModel)
+					if (found && found.enabled === true && found.status === "active" && found.capabilities?.tools === true && !isLocalProvider(found.providerID, settings.extraCloudProviders)) {
+						suggestion = settings.rerouteModel
+					} else {
+						console.warn("[gate] rerouteModel", settings.rerouteModel, "not suitable for reroute (missing or local provider) — falling back to auto-pick")
+					}
+				} catch (err) {
+					console.warn("[gate] model.list failed for rerouteModel check:", describeError(err))
+					// Leave suggestion unset so it falls through to suggestCloudModel.
+				}
+			}
+
+			if (!suggestion) {
+				try {
+					suggestion = await withTimeout(getParentProvider(event.sessionID).then(suggestCloudModel), 5_000, "suggestCloudModel")
+				} catch (err) {
+					suggestionError = err
+				}
 			}
 
 			if (suggestion) {
@@ -222,18 +322,18 @@ export default Plugin.define({
 				pendingReroutes.push({ callID: event.id, parentID: event.sessionID, model: suggestion, agent, description: typeof input.description === "string" ? input.description : undefined, at: Date.now() })
 				counters.rerouted++
 				record({ time: Date.now(), kind: "reroute", agent, parentID: event.sessionID, model: suggestion, callID: event.id })
-				debug = { lastDecision: "reroute", active: activeLocalChildren.size, reservations: reservations.size, at: Date.now() }
-				console.info("[subagent-gate] decision", "reroute", "active", activeLocalChildren.size, "reservations", reservations.size, "cap", LOCAL_CHILD_CAP)
-				console.info("[subagent-gate] reroute:", agent ?? "(unnamed)", "→", suggestion, "-", status)
+				debug = { lastDecision: "reroute", active: c.active, reservations: c.reservations, at: Date.now() }
+				logDebug("[gate] decision", "reroute", "active", c.active, "reservations", c.reservations, "cap", c.cap)
+				logDebug("[gate] reroute:", agent ?? "(unnamed)", "→", suggestion, "-", status)
 				emit()
 				return
 			}
 
 			counters.denied++
 			record({ time: Date.now(), kind: "deny", agent, parentID: event.sessionID, model: providerID, callID: event.id })
-			debug = { lastDecision: "deny", active: activeLocalChildren.size, reservations: reservations.size, at: Date.now() }
-			console.warn("[subagent-gate] decision", "deny", "active", activeLocalChildren.size, "reservations", reservations.size, "cap", LOCAL_CHILD_CAP)
-			console.warn("[subagent-gate] deny:", agent ?? "(unnamed)", "-", status)
+			debug = { lastDecision: "deny", active: c.active, reservations: c.reservations, at: Date.now() }
+			console.warn("[gate] decision", "deny", "active", c.active, "reservations", c.reservations, "cap", c.cap)
+			console.warn("[gate] deny:", agent ?? "(unnamed)", "-", status)
 			emit()
 			throw new Error(
 				suggestionError
@@ -253,41 +353,47 @@ export default Plugin.define({
 			slug: string
 		}
 
-		// Returns true when the child is the target of a rerouted call.
-		// allowParentOnlyMatch: when data.model is missing/unmatched, allow matching pending reroutes by parentID only.
-		// shortcut: reservations matched by parentID not call, upgrade if session.created exposes callID
-		const linkReroute = (data: CreatedData, parentID: string, allowParentOnlyMatch: boolean): boolean => {
-			const childModel = data.model ? data.model.providerID + "/" + data.model.id : undefined
-			let index = childModel
-				? pendingReroutes.findIndex((r) => r.parentID === parentID && r.model === childModel)
-				: -1
-			if (index === -1 && allowParentOnlyMatch) {
-				index = pendingReroutes.findIndex((r) => r.parentID === parentID)
-			}
-			if (index === -1) return false
-			const [entry] = pendingReroutes.splice(index, 1)
+		// Shared helper: link a claimed reroute entry to a session.
+		// Called by linkReroute (session.created) and the title hook.
+		const linkClaimedReroute = (sessionID: string, parentID: string, entry: RerouteEntry): void => {
+			// Mark recent entry's childID.
 			const match = recent.find((r) => r.callID === entry.callID)
-			if (match) match.childID = data.sessionID
-			emit()
+			if (match) match.childID = sessionID
 			// Track child info for rerouted child.
-			childInfo.set(data.sessionID, { childID: data.sessionID, parentID, ...(entry.agent && { agent: entry.agent }), ...(entry.model && { model: entry.model }), local: false })
+			childInfo.set(sessionID, { childID: sessionID, parentID, ...(entry.agent && { agent: entry.agent }), ...(entry.model && { model: entry.model }), local: false })
 			// Track desired title when description exists.
 			if (entry.description) {
 				const desiredTitle = entry.description + " [routed to " + entry.model + "]"
-				reroutedTitles.set(data.sessionID, desiredTitle)
+				reroutedTitles.set(sessionID, desiredTitle)
 				// Belt-and-braces: if title already set, update once.
-				if (data.title && !data.title.includes("[routed to ")) {
-					ctx.session
-						.update({ sessionID: data.sessionID, title: desiredTitle })
-						.catch((err) => console.warn("[subagent-gate] belt title update failed:", err))
-				}
-			} else {
-				// Fallback: rename when no description was provided.
 				ctx.session
-					.update({ sessionID: data.sessionID, title: (data.title ?? data.slug) + " [routed to " + entry.model + "]" })
-					.catch((err) => console.warn("[subagent-gate] title update failed:", err))
+					.update({ sessionID, title: desiredTitle })
+					.catch((err) => console.warn("[gate] belt title update failed:", err))
 			}
-			return true
+			emit()
+		}
+
+		// Returns true when the child is the target of a rerouted call.
+		// Checks claimedReroutes first to prevent double-handling.
+		const linkReroute = (data: CreatedData, parentID: string, allowParentOnlyMatch: boolean): boolean => {
+			// Check claimedReroutes first — prevent double-handling.
+			if (claimedReroutes.has(data.sessionID)) return true
+
+			const childModel = data.model ? data.model.providerID + "/" + data.model.id : undefined
+			const entry = claimRerouteForChild(pendingReroutes, parentID, childModel, false)
+			if (entry) {
+				claimedReroutes.set(data.sessionID, entry)
+				linkClaimedReroute(data.sessionID, parentID, entry)
+				return true
+			} else if (allowParentOnlyMatch) {
+				const fallback = claimRerouteForChild(pendingReroutes, parentID, undefined, true)
+				if (!fallback) return false
+				claimedReroutes.set(data.sessionID, fallback)
+				linkClaimedReroute(data.sessionID, parentID, fallback)
+				return true
+			} else {
+				return false
+			}
 		}
 
 		const onChildCreated = async (data: CreatedData, parentID: string) => {
@@ -295,35 +401,37 @@ export default Plugin.define({
 
 			// Resolve provider first so linkReroute can decide correctly.
 			let providerID: string | undefined
-			try {
-				providerID = data.model?.providerID ?? (await resolveProvider(data.agent, undefined, parentID))
-			} catch (err) {
-				providerID = data.model?.providerID
+			if (data.model?.providerID) {
+				providerID = data.model.providerID
+			} else {
+				try {
+					providerID = await withTimeout(resolveProvider(data.agent, undefined, parentID), 5_000, "onChildCreated-resolveProvider")
+				} catch (err) {
+					console.warn("[gate] onChildCreated: resolveProvider timeout/error for", data.sessionID, describeError(err))
+					providerID = undefined
+				}
 			}
 			if (!providerID) {
-				console.warn("[subagent-gate] onChildCreated: unknown provider for", data.sessionID)
+				console.warn("[gate] onChildCreated: unknown provider for", data.sessionID)
 				return
 			}
 
-			// Only allow parentID-only reroute match when provider is not local or no reservation for this parent.
-			const hasReservation = [...reservations].some(([, r]) => r.parentID === parentID)
-			const allowParentOnlyMatch = !isLocalProvider(providerID) || !hasReservation
+			// Only allow parentID-only reroute match when child has no model AND provider is cloud.
+			const allowParentOnlyMatch = !data.model && !isLocalProvider(providerID, settings.extraCloudProviders)
 			if (linkReroute(data, parentID, allowParentOnlyMatch)) return
 
-			if (!isLocalProvider(providerID)) return
+			if (!isLocalProvider(providerID, settings.extraCloudProviders)) return
 
-			if (hasReservation) {
-				const oldest = [...reservations].find(([, r]) => r.parentID === parentID)
-				if (oldest) reservations.delete(oldest[0])
-			}
+			gate.activate(data.sessionID, parentID)
 			localChildren.add(data.sessionID)
-			activeLocalChildren.add(data.sessionID)
 			createdAt.set(data.sessionID, Date.now())
 			startedAt.set(data.sessionID, Date.now())
 			// Track child info for local child.
 			const modelStr = data.model ? data.model.providerID + "/" + data.model.id : providerID
-			childInfo.set(data.sessionID, { childID: data.sessionID, parentID, ...(data.agent && { agent: data.agent }), ...(modelStr && { model: modelStr }), local: true })
-			console.info("[subagent-gate] local child created:", data.sessionID, "active", activeLocalChildren.size)
+			const entry: ChildEntry = { childID: data.sessionID, parentID, ...(data.agent && { agent: data.agent }), ...(modelStr && { model: modelStr }), local: true }
+			childInfo.set(data.sessionID, entry)
+			localChildEntries.set(data.sessionID, entry)
+			logDebug("[gate] local child created:", data.sessionID, "active", gate.counts().active)
 			emit()
 		}
 
@@ -337,9 +445,19 @@ export default Plugin.define({
 					return
 				}
 				case "session.execution.started": {
-					if (localChildren.has(event.data.sessionID) && !activeLocalChildren.has(event.data.sessionID)) {
-						activeLocalChildren.add(event.data.sessionID)
+					if (localChildren.has(event.data.sessionID)) {
+						const parentID = localChildEntries.get(event.data.sessionID)?.parentID ?? ""
+						// Only call gate.activate when NOT already active — first-run children
+						// are already activated in onChildCreated (which consumed its reservation).
+						if (!gate.activeIDs().includes(event.data.sessionID)) {
+							gate.activate(event.data.sessionID, parentID)
+						}
 						startedAt.set(event.data.sessionID, Date.now())
+						// Restore childInfo for re-prompted local children.
+						const stored = localChildEntries.get(event.data.sessionID)
+						if (stored && !childInfo.has(event.data.sessionID)) {
+							childInfo.set(event.data.sessionID, stored)
+						}
 						emit()
 					}
 					return
@@ -348,29 +466,33 @@ export default Plugin.define({
 				case "session.execution.failed":
 				case "session.execution.interrupted": {
 					const id = event.data.sessionID
-					if (activeLocalChildren.delete(id)) {
+					if (gate.deactivate(id)) {
 						createdAt.delete(id)
 						startedAt.delete(id)
 						childInfo.delete(id)
 						reroutedTitles.delete(id)
+						claimedReroutes.delete(id)
 						emit()
 					}
-					// Rerouted children are not in activeLocalChildren but may be in childInfo.
+					// Rerouted children are not in active but may be in childInfo.
 					if (childInfo.has(id)) {
 						childInfo.delete(id)
 						reroutedTitles.delete(id)
+						claimedReroutes.delete(id)
 						emit()
 					}
 					return
 				}
 				case "session.deleted": {
 					const id = event.data.sessionID
-					const wasActive = activeLocalChildren.delete(id)
+					const wasActive = gate.deactivate(id)
 					localChildren.delete(id)
+					localChildEntries.delete(id)
 					createdAt.delete(id)
 					startedAt.delete(id)
 					const hadInfo = childInfo.delete(id)
 					reroutedTitles.delete(id)
+					claimedReroutes.delete(id)
 					if (wasActive || hadInfo) emit()
 					return
 				}
@@ -388,18 +510,18 @@ export default Plugin.define({
 						try {
 							await handle(event)
 						} catch (err) {
-							console.warn("[subagent-gate] event handler failed:", event.type, err)
+							console.warn("[gate] event handler failed:", event.type, err)
 						}
 					}
 				} catch (err) {
 					if (controller.signal.aborted) return
-					console.warn("[subagent-gate] event stream error:", err)
+					console.warn("[gate] event stream error:", err)
 				}
 				if (controller.signal.aborted) return
-				console.warn("[subagent-gate] event stream ended, reconnecting")
+				console.warn("[gate] event stream ended, reconnecting")
 				await sleep(delay).catch(() => {}) // sleep may be aborted
 				if (controller.signal.aborted) return
-				await reconcile().catch((err) => console.warn("[subagent-gate] reconcile failed:", err))
+				await reconcile().catch((err) => console.warn("[gate] reconcile failed:", err))
 				// Exponential backoff capped at 30s; reset after successful reconnect.
 				delay = Math.min(delay * 2, 30_000)
 			}
@@ -422,7 +544,7 @@ export default Plugin.define({
 					event.sessionID,
 				)
 			} catch (err) {
-				console.warn("[subagent-gate] resolveProvider failed:", describeError(err))
+				console.warn("[gate] resolveProvider failed:", describeError(err))
 				// Fall back to parent session's provider.
 				try {
 					providerID = (await ctx.session.get({ sessionID: event.sessionID })).model?.providerID
@@ -431,7 +553,7 @@ export default Plugin.define({
 					return
 				}
 			}
-			if (!isLocalProvider(providerID)) return
+			if (!isLocalProvider(providerID, settings.extraCloudProviders)) return
 
 			const run = chain.then(() => decide(event, providerID))
 			chain = run.then(
@@ -442,7 +564,7 @@ export default Plugin.define({
 				await run
 			} catch (err) {
 				// decide may throw after making a reservation; release it.
-				if (reservations.delete(event.id)) emit()
+				if (gate.release(event.id)) emit()
 				throw err
 			}
 		})
@@ -450,7 +572,7 @@ export default Plugin.define({
 		await ctx.tool.hook("execute.after", async (event) => {
 			if (event.status !== "completed") {
 				// Call failed — release its reservation so the slot frees up.
-				if (reservations.delete(event.id)) emit()
+				if (gate.release(event.id)) emit()
 				// Also clean up reroute tracking for failed calls.
 				reroutedCalls.delete(event.id)
 				const pi = pendingReroutes.findIndex((r) => r.callID === event.id)
@@ -464,7 +586,7 @@ export default Plugin.define({
 			if (!model) return
 			reroutedCalls.delete(event.id)
 			try {
-				appendRerouteNote(event.result, "[subagent-gate: rerouted to " + model.model + "]")
+				appendRerouteNote(event.result, "[gate: rerouted to " + model.model + "]")
 			} catch {
 				// best-effort note; never fail the call over this
 			}
@@ -472,20 +594,44 @@ export default Plugin.define({
 
 		await ctx.session.hook("context", (event) => {
 			if (localChildren.has(event.sessionID)) return
-			if (event.model && isLocalProvider(event.model.providerID)) return
+			if (event.model && isLocalProvider(event.model.providerID, settings.extraCloudProviders)) return
 			event.system.push({
 				type: "text",
 				text:
 					"When delegating independent work to subagents, prefer launching multiple in parallel (background: true) rather than one at a time — there is no concurrency limit for cloud-model subagents. Local-model subagents are capped at " +
-					LOCAL_CHILD_CAP +
+					settings.cap +
 					" concurrent; overflow is routed to a cloud model automatically when one is available.",
 			})
 		})
 
-		await ctx.session.hook("title", (event) => {
-			const title = reroutedTitles.get(event.sessionID)
-			if (!title) return
-			event.result = title
+		await ctx.session.hook("title", async (event) => {
+			if (localChildren.has(event.sessionID)) return
+			const t = reroutedTitles.get(event.sessionID)
+			if (t) {
+				event.result = t
+				return
+			}
+			if (event.model) {
+				let parentID: string | undefined
+				try {
+					const parent = await withTimeout(ctx.session.get({ sessionID: event.sessionID }), 5_000, "session.get-title")
+					parentID = parent.parentID
+				} catch {
+					return
+				}
+				if (parentID) {
+					const childModel = event.model.providerID + "/" + event.model.id
+					const entry = claimRerouteForChild(pendingReroutes, parentID, childModel, false)
+					if (entry) {
+						claimedReroutes.set(event.sessionID, entry)
+						linkClaimedReroute(event.sessionID, parentID, entry)
+						if (entry.description) {
+							event.result = entry.description + " [routed to " + entry.model + "]"
+						}
+						return
+					}
+				}
+			}
 		})
 
 		// Catch registration errors during setup: abort controller, dispose rpc reg, rethrow.

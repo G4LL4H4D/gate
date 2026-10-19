@@ -1,20 +1,33 @@
 /** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode/plugin/tui"
 import { Gate, type Stats, type ChildEntry } from "./rpc"
+import type { RpcClient } from "@opencode/client/promise"
+import type { Settings } from "./settings"
+import { withRerouteModel } from "./settings"
 import { Show, For, createMemo } from "solid-js"
+import { splitRoutedTitle, shortModel } from "./title"
 
 export default Plugin.define({
-  id: "subagent-gate-tui",
+  id: "gate-tui",
   async setup(ctx) {
-    let gate: any
+    let gate: RpcClient<typeof Gate> | null
     try {
       gate = ctx.client.rpc(Gate)
     } catch {
       gate = null
     }
 
+    const describeError = (err: unknown): string => {
+      if (err instanceof Error) return err.message
+      if (err && typeof err === "object") {
+        if ("message" in err && typeof (err as any).message === "string") return (err as any).message
+        if ("data" in err && typeof (err as any).data === "object" && (err as any).data && "message" in (err as any).data && typeof (err as any).data.message === "string") return (err as any).data.message
+      }
+      return String(err)
+    }
+
     const [stats, setStats] = ctx.storage.memory(
-      "subagent-gate",
+      "gate",
       { initial: { loaded: false as boolean, data: null as Stats | null } }
     )
     const seen = new Set<string>()
@@ -64,15 +77,15 @@ export default Plugin.define({
     }
 
     async function refresh() {
-      if (disposed) return
+      if (disposed || !gate) return
       try {
-        const s = await gate.stats({})
+        const s = (await gate.stats({})) as Stats
         apply(s)
         if (!subscribed) {
           try {
             off = gate.events.on("changed", (ev: any) => {
               try {
-                const data = ev && typeof ev === "object" && "data" in ev ? ev.data : (ev as Stats)
+                const data = (ev && typeof ev === "object" && "data" in ev ? ev.data : ev) as Stats
                 apply(data)
               } catch {}
             })
@@ -146,24 +159,69 @@ export default Plugin.define({
       }
 
       function getLabel(id: string): string {
-        const entry = getEntry(id)
         const session = ctx.data.session.get(id)
-        return entry?.agent ?? session?.title ?? id
+        const title = session?.title
+        if (title) {
+          const label = splitRoutedTitle(title).label
+          if (label) return label
+        }
+        const entry = getEntry(id)
+        const agent = entry?.agent
+        if (agent) return agent
+        return id
       }
 
       function getRoute(id: string): string | undefined {
         const entry = getEntry(id)
-        if (entry?.local === false && entry?.model) return `→ ${entry.model}`
+        if (entry?.local === false && entry?.model) return `→ ${shortModel(entry.model)}`
         if (entry?.local === true) return "local"
+        // entry dropped at execution end — parse session title for reroute tag
+        const session = ctx.data.session.get(id)
+        const title = session?.title
+        if (title) {
+          const parsed = splitRoutedTitle(title)
+          if (parsed.model) return `→ ${shortModel(parsed.model)}`
+        }
         return undefined
       }
 
       const statsAccessor = () => stats.data
 
-      function Row(idProps: { id: string }) {
+      function Row(idProps: { id: string; stacked?: boolean }) {
         const running = () => ctx.data.session.status(idProps.id) === "running"
         const route = () => getRoute(idProps.id)
-        const label = () => truncate(getLabel(idProps.id), 28)
+        const label = () => {
+          const raw = getLabel(idProps.id)
+          const r = route()
+          if (!r) return raw
+          const maxLabel = Math.max(10, 28 - r.length - 1)
+          return raw.length > maxLabel ? raw.slice(0, maxLabel) + "…" : raw
+        }
+        const labelTruncated = () => {
+          const raw = getLabel(idProps.id)
+          return raw.length > 28 ? raw.slice(0, 28) + "…" : raw
+        }
+
+        if (idProps.stacked) {
+          return (
+            <box flexDirection="column" onMouseUp={() => ctx.ui.router.navigate({ type: "session", sessionID: idProps.id })}>
+              <box flexDirection="row" gap={1}>
+                <text fg={color((t: any) => (running() ? t.text.feedback.success.base : t.text.muted))}>
+                  {running() ? "●" : "○"}
+                </text>
+                <text fg={color((t: any) => t.text.base)}>
+                  {labelTruncated()}
+                </text>
+              </box>
+              <Show when={route()} keyed>{(r: string) => (
+                <text fg={color((t: any) => t.text.feedback.warning.base)} marginLeft={2}>
+                  {r.length > 30 ? r.slice(0, 30) + "…" : r}
+                </text>
+              )}</Show>
+            </box>
+          )
+        }
+
         return (
           <box flexDirection="row" gap={1} onMouseUp={() => ctx.ui.router.navigate({ type: "session", sessionID: idProps.id })}>
             <text fg={color((t: any) => (running() ? t.text.feedback.success.base : t.text.muted))}>
@@ -208,7 +266,7 @@ export default Plugin.define({
               Subagents {active()}/{cap()} · ↪ {rerouted()}
             </text>
             <For each={family()}>
-              {(id) => <Row id={id} />}
+              {(id) => <Row id={id} stacked />}
             </For>
           </box>
         </Show>
@@ -218,14 +276,24 @@ export default Plugin.define({
     try {
       ctx.keymap.layer(() => ({
         mode: "global",
-        commands: [{
-          id: "subagent-gate.stats",
-          title: "Subagent gate stats",
-          group: "Subagent gate",
-          palette: true,
-          slash: { name: "gate" },
-          run,
-        }],
+        commands: [
+          {
+            id: "gate.stats",
+            title: "Subagent gate stats",
+            group: "Subagent gate",
+            palette: true,
+            slash: { name: "gate" },
+            run,
+          },
+          {
+            id: "gate.settings",
+            title: "GATE: Settings",
+            group: "Subagent gate",
+            palette: true,
+            slash: { name: "gate-settings" },
+            run: settingsFlow,
+          },
+        ],
       }))
     } catch {}
 
@@ -260,6 +328,12 @@ export default Plugin.define({
           })
         }
 
+        options.push({
+          title: "Settings…",
+          value: "__settings__",
+          category: "GATE",
+        })
+
         for (const e of recent) {
           options.push({
             title: `${e.kind} ${e.agent ?? "?"}`,
@@ -274,10 +348,211 @@ export default Plugin.define({
           options,
         })
 
-        if (result) {
+        if (result === "__settings__") {
+          try { await settingsFlow() } catch (err) {
+            await ctx.ui.toast.show({
+              title: "GATE: Settings",
+              message: describeError(err),
+              variant: "error",
+            })
+          }
+        } else if (result) {
           ctx.ui.router.navigate({ type: "session", sessionID: result })
         }
       } catch {}
+    }
+
+    async function settingsFlow() {
+      if (!gate) {
+        await ctx.ui.toast.show({
+          title: "GATE: Settings",
+          message: "gate unavailable",
+          variant: "error",
+        })
+        return
+      }
+      const g = gate
+      let current: Settings
+      for (;;) {
+        try {
+          current = await g.settingsGet({}) as Settings
+        } catch (err) {
+          await ctx.ui.toast.show({
+            title: "GATE: Settings",
+            message: describeError(err),
+            variant: "error",
+          })
+          return
+        }
+        const result = await ctx.ui.dialog.select({
+          title: "GATE: Settings",
+          options: [
+            {
+              title: "Concurrent local cap",
+              value: "cap",
+              description: String(current.cap),
+              category: "GATE",
+            },
+            {
+              title: "Reroute model",
+              value: "rerouteModel",
+              description: current.rerouteModel ?? "(auto)",
+              category: "GATE",
+            },
+            {
+              title: "Extra cloud providers",
+              value: "extraCloudProviders",
+              description: current.extraCloudProviders.join(", "),
+              category: "GATE",
+            },
+            {
+              title: "Debug logging",
+              value: "debug",
+              description: current.debug ? "on" : "off",
+              category: "GATE",
+            },
+          ],
+        })
+        if (!result) return // dismissed (Esc)
+
+        if (result === "cap") {
+          const input = await ctx.ui.dialog.prompt({
+            title: "Concurrent local cap",
+            description: "Integer 1..32",
+            value: String(current.cap),
+          })
+          if (input === undefined) continue
+          const n = Number(input)
+          if (!Number.isInteger(n) || n < 1 || n > 32) {
+            await ctx.ui.toast.show({
+              title: "GATE: Settings",
+              message: "cap must be an integer 1..32",
+              variant: "error",
+            })
+            continue
+          }
+          try {
+            current = await g.settingsSet({ ...current, cap: n }) as Settings
+            await ctx.ui.toast.show({
+              title: "GATE: Settings",
+              message: "cap updated",
+              variant: "success",
+            })
+          } catch (err) {
+            await ctx.ui.toast.show({
+              title: "GATE: Settings",
+              message: describeError(err),
+              variant: "error",
+            })
+          }
+        } else if (result === "rerouteModel") {
+          const models = (() => {
+            try {
+              return ctx.data.location.model.list()
+            } catch {
+              return undefined
+            }
+          })()
+          if (models && models.length > 0) {
+            const opts: Array<{ title: string; value: string | null; description?: string }> = [
+              { title: "Auto (default)", value: null, description: "use the default model" },
+            ]
+            for (const m of models) {
+              // Filter: only show models that look usable as cloud reroute targets
+              // (enabled, active status, tool-call capability).
+              // Cannot know the server's cloud allowlist here; server rejects local models
+              // with validation_error and the TUI shows that message.
+              if (
+                m.enabled &&
+                m.status === "active" &&
+                m.capabilities?.tools
+              ) {
+                opts.push({ title: m.name, value: `${m.providerID}/${m.id}`, description: m.providerID })
+              }
+            }
+            const pick = await ctx.ui.dialog.select({
+              title: "Reroute model",
+              options: opts,
+              current: current.rerouteModel ?? null,
+            })
+            if (pick === undefined) continue
+            try {
+              current = await g.settingsSet(withRerouteModel(current, pick ?? undefined)) as Settings
+              await ctx.ui.toast.show({
+                title: "GATE: Settings",
+                message: pick ? "reroute model set" : "reroute model cleared",
+                variant: "success",
+              })
+            } catch (err) {
+              await ctx.ui.toast.show({
+                title: "GATE: Settings",
+                message: describeError(err),
+                variant: "error",
+              })
+            }
+          } else {
+            const input = await ctx.ui.dialog.prompt({
+              title: "Reroute model",
+              description: "providerID/id, or empty for auto",
+              value: current.rerouteModel ?? "",
+            })
+            if (input === undefined) continue
+            try {
+              current = await g.settingsSet(withRerouteModel(current, input.trim() || undefined)) as Settings
+              await ctx.ui.toast.show({
+                title: "GATE: Settings",
+                message: input.trim() ? "reroute model set" : "reroute model cleared",
+                variant: "success",
+              })
+            } catch (err) {
+              await ctx.ui.toast.show({
+                title: "GATE: Settings",
+                message: describeError(err),
+                variant: "error",
+              })
+            }
+          }
+        } else if (result === "extraCloudProviders") {
+          const input = await ctx.ui.dialog.prompt({
+            title: "Extra cloud providers",
+            description: "comma-separated provider IDs",
+            value: current.extraCloudProviders.join(", "),
+          })
+          if (input === undefined) continue
+          try {
+            current = await g.settingsSet({
+              ...current,
+              extraCloudProviders: input.split(",").map((s) => s.trim()).filter(Boolean),
+            }) as Settings
+            await ctx.ui.toast.show({
+              title: "GATE: Settings",
+              message: "extra cloud providers updated",
+              variant: "success",
+            })
+          } catch (err) {
+            await ctx.ui.toast.show({
+              title: "GATE: Settings",
+              message: describeError(err),
+              variant: "error",
+            })
+          }
+        } else if (result === "debug") {
+          try {
+            current = await g.settingsSet({ ...current, debug: !current.debug }) as Settings
+            await ctx.ui.toast.show({
+              title: "GATE: Settings",
+              message: "debug logging " + (current.debug ? "on" : "off"),
+              variant: "success",
+            })
+          } catch (err) {
+            await ctx.ui.toast.show({
+              title: "GATE: Settings",
+              message: describeError(err),
+              variant: "error",
+            })
+          }
+        }
+      }
     }
 
     function cleanup() {

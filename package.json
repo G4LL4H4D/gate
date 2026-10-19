@@ -1,15 +1,22 @@
 {
   "name": "opencode-gate",
   "version": "0.1.0",
-  "description": "Caps concurrent local-model subagents and reroutes overflow to a cloud model",
+  "description": "Concurrency gate for OpenCode: caps local-model subagents and reroutes overflow to a cloud model",
   "type": "module",
   "license": "MIT",
+  "author": "Charles",
   "keywords": [
     "opencode",
     "opencode-plugin",
     "subagent",
     "gate"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/G4LL4H4D/gate.git"
+  },
+  "homepage": "https://github.com/G4LL4H4D/gate#readme",
+  "bugs": "https://github.com/G4LL4H4D/gate/issues",
   "files": [
     "dist",
     "README.md",
@@ -23,10 +30,14 @@
   "scripts": {
     "build": "bun run scripts/build.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "prepublishOnly": "grep '\"file:' package.json && { echo 'Cannot publish: file: devDependencies found'; exit 1; } || true && bun run typecheck && bun test && bun run build"
   },
   "peerDependencies": {
-    "@opencode/plugin": ">=2.0.26"
+    "@opencode/plugin": ">=2.0.26",
+    "@opentui/solid": "*",
+    "@opentui/core": "*",
+    "solid-js": ">=1.9.0"
   },
   "peerDependenciesMeta": {
     "@opentui/solid": {
@@ -40,12 +51,11 @@
     }
   },
   "devDependencies": {
-    "@opencode/plugin": "file:/home/charles/.config/opencode/node_modules/@opencode/plugin",
+    "@opencode/plugin": "^2.0.32",
     "typescript": "5.8.2",
     "@types/bun": "1.4.0",
     "solid-js": "1.9.15",
     "@opentui/solid": "0.5.17",
     "@opentui/core": "0.5.17"
-  },
-  "repository": "git+https://github.com/OWNER/gate.git"
+  }
 }
