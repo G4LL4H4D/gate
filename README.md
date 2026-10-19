@@ -53,6 +53,7 @@ Subagents 0/2 · ↪ 2
 ## Verified
 
 - **Installed from npm (opencode-gate@0.1.0):** server and TUI plugins load; footer shows the counter.
+- **Panel collapse/expand and newest-first rows (0.1.1):** tested on a local build.
 - **Tested on a local build of the same files** (the npm tarball is byte-identical): cap 2 with 4 overlapping subagents (background + foreground), reroute to a free cloud model, sidebar panel with live updates and routed marks, `/gate`, `/gate-settings` with persistence.
 
 ## Install

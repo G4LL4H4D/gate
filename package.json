@@ -1,6 +1,6 @@
 {
   "name": "opencode-gate",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Concurrency gate for OpenCode: caps local-model subagents and reroutes overflow to a cloud model",
   "type": "module",
   "license": "MIT",
