@@ -33,21 +33,11 @@ export default Plugin.define({
     )
     const seen = new Set<string>()
     let seeded = false
-    let gateUi: { expanded: boolean }
-    let setGateUi: any
-    try {
-      const [g, s] = ctx.storage.store("gate-ui", { initial: { expanded: false } })
-      gateUi = g; setGateUi = s
-    } catch {
-      // Older host may not support ctx.storage.store; fall back to in-memory state (non-persistent)
-      const state = { expanded: false }
-      gateUi = state
-      setGateUi = (fn: any) => {
-        if (typeof fn === "function") fn(state)
-        else Object.assign(state, fn)
-        return Promise.resolve()
-      }
-    }
+    const [gateUi, _setGateUi] = ctx.storage.memory(
+      "gate-ui",
+      { initial: { expanded: false } }
+    )
+    const setGateUi = (fn: Parameters<typeof _setGateUi>[0]) => Promise.resolve(_setGateUi(fn) as void)
     let disposed = false
 
     function color(pick: any): string | undefined {
